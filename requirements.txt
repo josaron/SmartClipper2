@@ -1,0 +1,28 @@
+# SmartClipper dependencies
+# Install with: pip install -r requirements.txt
+
+# Core UI
+gradio>=4.44.0
+pydantic>=2.0,<2.11  # Pin to avoid Gradio schema bug with pydantic 2.11+
+
+# Video download
+yt-dlp
+
+# Text-to-Speech (Microsoft Edge TTS - free, no API key)
+edge-tts
+
+# Video processing
+moviepy>=2.0.0
+imageio-ffmpeg        # Bundled FFmpeg
+
+# Face/pose detection  
+mediapipe<0.10.10     # Pinned for Python 3.9 compatibility
+opencv-python<4.11
+opencv-contrib-python<4.11
+numpy>=1.21,<2.0      # Compatible with opencv and mediapipe
+
+# Audio utilities
+mutagen               # Audio duration detection
+
+# Caption rendering
+pillow>=10.0.0        # Text rendering for captions

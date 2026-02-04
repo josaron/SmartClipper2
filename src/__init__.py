@@ -1,0 +1,1 @@
+# SmartClipper source modules
