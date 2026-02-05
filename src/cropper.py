@@ -388,46 +388,54 @@ def extract_still_with_ken_burns(
     cropped_frame = frame[y:y+crop_h, x:x+crop_w]
     resized_frame = cv2.resize(cropped_frame, (target_width, target_height))
     
-    # Save the still frame temporarily
+    # Save the still frame at 2x resolution for smoother zoompan interpolation
+    # Higher resolution source = smoother zoom animation
+    upscale_factor = 2
+    upscaled_frame = cv2.resize(
+        resized_frame, 
+        (target_width * upscale_factor, target_height * upscale_factor),
+        interpolation=cv2.INTER_LANCZOS4
+    )
+    
     temp_frame_path = output_path + ".frame.png"
-    cv2.imwrite(temp_frame_path, resized_frame)
+    cv2.imwrite(temp_frame_path, upscaled_frame)
     
     # Use FFmpeg to create Ken Burns effect
-    # The zoompan filter creates smooth zoom animation from a still image
-    # zoom: starts at 1, ends at zoom_factor
-    # d: duration in frames
-    # fps: output framerate
-    # s: output size
+    # We use a fixed 30fps for consistent smooth output
+    output_fps = 30
+    total_frames = int(target_duration * output_fps)
     
-    total_frames = int(target_duration * fps)
+    # Smooth ease-in-out zoom using cosine interpolation
+    # Formula: 1 + (zoom_factor-1) * (1 - cos(pi * on/d)) / 2
+    # This creates smooth acceleration at start and deceleration at end
+    zoom_delta = zoom_factor - 1
+    zoom_expr = f"1+{zoom_delta}*(1-cos(PI*on/{total_frames}))/2"
     
-    # zoompan parameters:
-    # z: zoom level expression (linear interpolation from 1 to zoom_factor)
-    # d: total duration in frames
-    # s: output size
-    # x,y: pan position (center the crop, accounting for zoom)
-    # The 'on' variable gives current frame number, 'zoom' gives current zoom
-    
-    # Center-focused zoom: zoom in toward center of frame
-    zoom_expr = f"min(zoom+{(zoom_factor-1)/total_frames},{{zoom_factor}})"
-    zoom_expr = f"1+({zoom_factor}-1)*on/{total_frames}"
-    
-    # Calculate center offset as zoom increases to keep subject centered
-    # As we zoom in, we need to offset x,y to keep the center stable
+    # Center the pan to keep subject in frame as we zoom
+    # x and y keep the zoom centered on the middle of the frame
     pan_x = f"(iw-iw/zoom)/2"
     pan_y = f"(ih-ih/zoom)/2"
     
     ffmpeg = get_ffmpeg_path()
     
-    # Build the zoompan filter
-    zoompan_filter = f"zoompan=z='{zoom_expr}':x='{pan_x}':y='{pan_y}':d={total_frames}:s={target_width}x{target_height}:fps={fps}"
+    # Build filter chain:
+    # 1. zoompan: creates zoom animation at 2x resolution
+    # 2. scale: downscale to target resolution with high-quality lanczos
+    zoompan_w = target_width * upscale_factor
+    zoompan_h = target_height * upscale_factor
+    
+    filter_chain = (
+        f"zoompan=z='{zoom_expr}':x='{pan_x}':y='{pan_y}':"
+        f"d={total_frames}:s={zoompan_w}x{zoompan_h}:fps={output_fps},"
+        f"scale={target_width}:{target_height}:flags=lanczos"
+    )
     
     cmd = [
         ffmpeg,
         '-y',
         '-loop', '1',
         '-i', temp_frame_path,
-        '-vf', zoompan_filter,
+        '-vf', filter_chain,
         '-t', str(target_duration),
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
