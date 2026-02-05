@@ -329,16 +329,18 @@ def extract_with_letterbox(
     target_width: int = TARGET_WIDTH,
     target_height: int = TARGET_HEIGHT,
     blur_strength: int = 25,
+    side_crop: float = 0.2,
 ) -> str:
     """
-    Extract a clip and show full width with blurred background letterbox.
+    Extract a clip and show with blurred background letterbox.
     
-    This layout preserves the full horizontal view by:
-    1. Creating a blurred, scaled background that fills the vertical frame
-    2. Overlaying the original video (scaled to fit width) centered vertically
+    This layout preserves more horizontal context than face-crop by:
+    1. Optionally cropping sides to make content fill more vertical space
+    2. Creating a blurred, scaled background that fills the vertical frame
+    3. Overlaying the video (scaled to fit width) centered vertically
     
     Ideal for wide shots, landscapes, group scenes, or screen recordings
-    where cropping would lose important visual context.
+    where full face-crop would lose important visual context.
     
     Args:
         source_path: Path to source video
@@ -349,6 +351,8 @@ def extract_with_letterbox(
         target_width: Output width (default 720)
         target_height: Output height (default 1280)
         blur_strength: Blur amount for background (default 25)
+        side_crop: Fraction of width to crop from sides (default 0.2 = 20%)
+                   0.0 = no crop (full width), 0.4 = crop 40% (20% each side)
         
     Returns:
         Path to processed video
@@ -358,10 +362,13 @@ def extract_with_letterbox(
     # Calculate speed adjustment factor
     pts_multiplier = target_duration / extract_duration
     
+    # Calculate side crop: keep (1 - side_crop) of the width, centered
+    keep_fraction = 1.0 - side_crop
+    
     # Build complex filter graph:
     # 1. Split input into foreground and background streams
     # 2. Background: scale to fill frame (crop excess), apply heavy blur
-    # 3. Foreground: scale to fit width, maintaining aspect ratio
+    # 3. Foreground: crop sides, then scale to fit width
     # 4. Overlay foreground centered on blurred background
     # 5. Apply speed adjustment and trim
     filter_str = (
@@ -371,8 +378,9 @@ def extract_with_letterbox(
         f"[bg]scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
         f"crop={target_width}:{target_height},"
         f"boxblur={blur_strength}:{blur_strength}[bgblur];"
-        # Foreground: scale to fit width, height auto-calculated to maintain aspect
-        f"[fg]scale={target_width}:-1[fgscaled];"
+        # Foreground: crop sides first (keep center portion), then scale to fit width
+        f"[fg]crop=iw*{keep_fraction}:ih:(iw-iw*{keep_fraction})/2:0,"
+        f"scale={target_width}:-1[fgscaled];"
         # Overlay foreground centered vertically on blurred background
         f"[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2,"
         # Apply speed adjustment and trim to target duration
@@ -400,7 +408,7 @@ def extract_with_letterbox(
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg letterbox extraction failed: {result.stderr}")
     
-    print(f"Letterbox: Created with blur background")
+    print(f"Letterbox: Created with blur background (side crop: {side_crop*100:.0f}%)")
     return output_path
 
 
@@ -413,6 +421,7 @@ def extract_still_with_letterbox(
     target_height: int = TARGET_HEIGHT,
     blur_strength: int = 25,
     zoom_factor: float = 1.04,
+    side_crop: float = 0.2,
 ) -> str:
     """
     Extract a still frame with blur background letterbox and subtle Ken Burns.
@@ -430,6 +439,8 @@ def extract_still_with_letterbox(
         target_height: Output height (default 1280)
         blur_strength: Blur amount for background (default 25)
         zoom_factor: Subtle zoom amount (1.04 = 4% zoom)
+        side_crop: Fraction of width to crop from sides (default 0.2 = 20%)
+                   0.0 = no crop (full width), 0.4 = crop 40% (20% each side)
         
     Returns:
         Path to processed video
@@ -455,6 +466,12 @@ def extract_still_with_letterbox(
     
     # Create the letterbox composite using OpenCV (static image)
     frame_height, frame_width = frame.shape[:2]
+    
+    # Apply side crop to the frame (keep center portion)
+    if side_crop > 0:
+        crop_pixels = int(frame_width * side_crop / 2)
+        frame = frame[:, crop_pixels:frame_width - crop_pixels]
+        frame_height, frame_width = frame.shape[:2]
     
     # Calculate scaled foreground dimensions
     fg_scale = target_width / frame_width
@@ -533,7 +550,7 @@ def extract_still_with_letterbox(
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg letterbox still failed: {result.stderr}")
     
-    print(f"Letterbox still: Created with blur background + subtle zoom")
+    print(f"Letterbox still: Created with blur background + subtle zoom (side crop: {side_crop*100:.0f}%)")
     return output_path
 
 
