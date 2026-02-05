@@ -14,6 +14,7 @@ class Segment:
     text: str               # Voiceover text
     footage_start: float    # Where to pull footage from source video (seconds)
     is_still: bool = False  # True = still image with Ken Burns, False = video clip
+    layout: str = "crop"    # Layout mode: "crop" (face-centered) or "letterbox" (blur background)
 
 
 def parse_timestamp(timestamp: str) -> float:
@@ -116,12 +117,21 @@ def parse_script_table(text: str) -> list[Segment]:
                 media_type = parts[2].strip().lower()
                 is_still = media_type == 'still'
             
+            # Parse 4th column for layout mode (default to crop)
+            # Supports: "crop" (face-centered), "letterbox" (blur background)
+            layout = "crop"
+            if len(parts) >= 4:
+                layout_value = parts[3].strip().lower()
+                if layout_value in ('letterbox', 'letter', 'blur', 'full'):
+                    layout = "letterbox"
+            
             if text_content:  # Only add if there's actual text
                 segments.append(Segment(
                     script_time=0,  # Not used, segments are concatenated sequentially
                     text=text_content,
                     footage_start=footage_start,
                     is_still=is_still,
+                    layout=layout,
                 ))
         except ValueError as e:
             print(f"Warning: Could not parse line {line_num + 1}: {line} ({e})")

@@ -320,6 +320,223 @@ def extract_crop_and_speed(
     return output_path
 
 
+def extract_with_letterbox(
+    source_path: str,
+    start_time: float,
+    extract_duration: float,
+    target_duration: float,
+    output_path: str,
+    target_width: int = TARGET_WIDTH,
+    target_height: int = TARGET_HEIGHT,
+    blur_strength: int = 25,
+) -> str:
+    """
+    Extract a clip and show full width with blurred background letterbox.
+    
+    This layout preserves the full horizontal view by:
+    1. Creating a blurred, scaled background that fills the vertical frame
+    2. Overlaying the original video (scaled to fit width) centered vertically
+    
+    Ideal for wide shots, landscapes, group scenes, or screen recordings
+    where cropping would lose important visual context.
+    
+    Args:
+        source_path: Path to source video
+        start_time: Start time in seconds
+        extract_duration: Duration to extract from source
+        target_duration: Desired output duration (for speed adjustment)
+        output_path: Path for output video
+        target_width: Output width (default 720)
+        target_height: Output height (default 1280)
+        blur_strength: Blur amount for background (default 25)
+        
+    Returns:
+        Path to processed video
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Calculate speed adjustment factor
+    pts_multiplier = target_duration / extract_duration
+    
+    # Build complex filter graph:
+    # 1. Split input into foreground and background streams
+    # 2. Background: scale to fill frame (crop excess), apply heavy blur
+    # 3. Foreground: scale to fit width, maintaining aspect ratio
+    # 4. Overlay foreground centered on blurred background
+    # 5. Apply speed adjustment and trim
+    filter_str = (
+        # Split the input into two streams
+        f"[0:v]split=2[fg][bg];"
+        # Background: scale to fill the frame (may crop), then blur
+        f"[bg]scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+        f"crop={target_width}:{target_height},"
+        f"boxblur={blur_strength}:{blur_strength}[bgblur];"
+        # Foreground: scale to fit width, height auto-calculated to maintain aspect
+        f"[fg]scale={target_width}:-1[fgscaled];"
+        # Overlay foreground centered vertically on blurred background
+        f"[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2,"
+        # Apply speed adjustment and trim to target duration
+        f"setpts={pts_multiplier}*PTS,trim=duration={target_duration}"
+    )
+    
+    ffmpeg = get_ffmpeg_path()
+    
+    cmd = [
+        ffmpeg,
+        '-y',
+        '-ss', str(start_time),  # Input seeking (fast)
+        '-i', source_path,
+        '-t', str(extract_duration),  # Duration to extract
+        '-filter_complex', filter_str,
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '23',
+        '-an',  # No audio
+        output_path,
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg letterbox extraction failed: {result.stderr}")
+    
+    print(f"Letterbox: Created with blur background")
+    return output_path
+
+
+def extract_still_with_letterbox(
+    source_path: str,
+    timestamp: float,
+    target_duration: float,
+    output_path: str,
+    target_width: int = TARGET_WIDTH,
+    target_height: int = TARGET_HEIGHT,
+    blur_strength: int = 25,
+    zoom_factor: float = 1.04,
+) -> str:
+    """
+    Extract a still frame with blur background letterbox and subtle Ken Burns.
+    
+    Combines letterbox layout with gentle zoom animation for visual interest.
+    The Ken Burns effect is applied to the entire composited frame to avoid
+    jitter from zooming individual layers.
+    
+    Args:
+        source_path: Path to source video
+        timestamp: Time in seconds to extract frame from
+        target_duration: Duration of output video
+        output_path: Path for output video
+        target_width: Output width (default 720)
+        target_height: Output height (default 1280)
+        blur_strength: Blur amount for background (default 25)
+        zoom_factor: Subtle zoom amount (1.04 = 4% zoom)
+        
+    Returns:
+        Path to processed video
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Extract frame using OpenCV
+    cap = cv2.VideoCapture(source_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {source_path}")
+    
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    
+    ret, frame = cap.read()
+    if not ret:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            raise RuntimeError(f"Could not read frame from: {source_path}")
+    
+    cap.release()
+    
+    # Create the letterbox composite using OpenCV (static image)
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Calculate scaled foreground dimensions
+    fg_scale = target_width / frame_width
+    fg_height = int(frame_height * fg_scale)
+    fg_width = target_width
+    
+    # Create blurred background
+    # Scale up to fill, then crop to target size
+    bg_scale = max(target_width / frame_width, target_height / frame_height)
+    bg_scaled = cv2.resize(frame, None, fx=bg_scale, fy=bg_scale, interpolation=cv2.INTER_LINEAR)
+    
+    # Crop to target dimensions from center
+    bg_h, bg_w = bg_scaled.shape[:2]
+    x_start = (bg_w - target_width) // 2
+    y_start = (bg_h - target_height) // 2
+    bg_cropped = bg_scaled[y_start:y_start+target_height, x_start:x_start+target_width]
+    
+    # Apply blur
+    bg_blurred = cv2.GaussianBlur(bg_cropped, (0, 0), sigmaX=blur_strength, sigmaY=blur_strength)
+    
+    # Scale foreground to fit width
+    fg_scaled = cv2.resize(frame, (fg_width, fg_height), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Create composite: overlay foreground centered on blurred background
+    composite = bg_blurred.copy()
+    y_offset = (target_height - fg_height) // 2
+    composite[y_offset:y_offset+fg_height, 0:fg_width] = fg_scaled
+    
+    # Save composite at higher resolution for smooth zoompan
+    upscale = 1.5
+    upscaled_w = int(target_width * upscale)
+    upscaled_h = int(target_height * upscale)
+    composite_upscaled = cv2.resize(composite, (upscaled_w, upscaled_h), interpolation=cv2.INTER_LANCZOS4)
+    
+    temp_frame_path = output_path + ".composite.png"
+    cv2.imwrite(temp_frame_path, composite_upscaled)
+    
+    # Ken Burns zoom parameters
+    output_fps = 30
+    total_frames = int(target_duration * output_fps)
+    zoom_delta = zoom_factor - 1
+    
+    # Apply zoompan to the entire composited frame, then scale down to target
+    # This avoids jitter from zooming individual layers
+    filter_str = (
+        f"zoompan=z='1+{zoom_delta}*(1-cos(PI*on/{total_frames}))/2':"
+        f"x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':"
+        f"d={total_frames}:s={upscaled_w}x{upscaled_h}:fps={output_fps},"
+        f"scale={target_width}:{target_height}:flags=lanczos"
+    )
+    
+    ffmpeg = get_ffmpeg_path()
+    
+    cmd = [
+        ffmpeg,
+        '-y',
+        '-loop', '1',
+        '-i', temp_frame_path,
+        '-t', str(target_duration),
+        '-vf', filter_str,
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        output_path,
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    # Clean up temp frame
+    try:
+        Path(temp_frame_path).unlink()
+    except Exception:
+        pass
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg letterbox still failed: {result.stderr}")
+    
+    print(f"Letterbox still: Created with blur background + subtle zoom")
+    return output_path
+
+
 # Ken Burns effect styles for variety
 KEN_BURNS_STYLES = ['zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down']
 
