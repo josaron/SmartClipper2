@@ -320,6 +320,10 @@ def extract_crop_and_speed(
     return output_path
 
 
+# Ken Burns effect styles for variety
+KEN_BURNS_STYLES = ['zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down']
+
+
 def extract_still_with_ken_burns(
     source_path: str,
     timestamp: float,
@@ -328,6 +332,7 @@ def extract_still_with_ken_burns(
     target_width: int = TARGET_WIDTH,
     target_height: int = TARGET_HEIGHT,
     zoom_factor: float = 1.08,
+    style: str = 'zoom_in',
 ) -> str:
     """
     Extract a still frame and apply Ken Burns effect (subtle zoom/pan).
@@ -342,7 +347,9 @@ def extract_still_with_ken_burns(
         output_path: Path for output video
         target_width: Output width (default 720)
         target_height: Output height (default 1280)
-        zoom_factor: How much to zoom in (1.08 = 8% zoom over duration)
+        zoom_factor: How much to zoom in/out (1.08 = 8% zoom)
+        style: Ken Burns style - 'zoom_in', 'zoom_out', 'pan_left', 
+               'pan_right', 'pan_up', 'pan_down'
         
     Returns:
         Path to processed video
@@ -405,16 +412,65 @@ def extract_still_with_ken_burns(
     output_fps = 30
     total_frames = int(target_duration * output_fps)
     
-    # Smooth ease-in-out zoom using cosine interpolation
-    # Formula: 1 + (zoom_factor-1) * (1 - cos(pi * on/d)) / 2
-    # This creates smooth acceleration at start and deceleration at end
+    # Build zoom and pan expressions based on style
+    # All use smooth ease-in-out via cosine interpolation
     zoom_delta = zoom_factor - 1
-    zoom_expr = f"1+{zoom_delta}*(1-cos(PI*on/{total_frames}))/2"
     
-    # Center the pan to keep subject in frame as we zoom
-    # x and y keep the zoom centered on the middle of the frame
-    pan_x = f"(iw-iw/zoom)/2"
-    pan_y = f"(ih-ih/zoom)/2"
+    # For panning styles, we use a static slight zoom and animate position
+    # The pan amount is based on the zoom margin (extra pixels from zoom)
+    
+    if style == 'zoom_in':
+        # Zoom from 1 to zoom_factor, centered
+        zoom_expr = f"1+{zoom_delta}*(1-cos(PI*on/{total_frames}))/2"
+        pan_x = f"(iw-iw/zoom)/2"
+        pan_y = f"(ih-ih/zoom)/2"
+        print(f"Ken Burns style: zoom_in")
+        
+    elif style == 'zoom_out':
+        # Zoom from zoom_factor to 1, centered (reverse of zoom_in)
+        zoom_expr = f"{zoom_factor}-{zoom_delta}*(1-cos(PI*on/{total_frames}))/2"
+        pan_x = f"(iw-iw/zoom)/2"
+        pan_y = f"(ih-ih/zoom)/2"
+        print(f"Ken Burns style: zoom_out")
+        
+    elif style == 'pan_left':
+        # Static zoom, pan from left to right
+        zoom_expr = f"{zoom_factor}"
+        # Start at x=0, end at x=(iw - iw/zoom) using ease-in-out
+        pan_x = f"(iw-iw/zoom)*(1-cos(PI*on/{total_frames}))/2"
+        pan_y = f"(ih-ih/zoom)/2"
+        print(f"Ken Burns style: pan_left (left to right)")
+        
+    elif style == 'pan_right':
+        # Static zoom, pan from right to left
+        zoom_expr = f"{zoom_factor}"
+        # Start at x=(iw - iw/zoom), end at x=0 using ease-in-out
+        pan_x = f"(iw-iw/zoom)*(1-(1-cos(PI*on/{total_frames}))/2)"
+        pan_y = f"(ih-ih/zoom)/2"
+        print(f"Ken Burns style: pan_right (right to left)")
+        
+    elif style == 'pan_up':
+        # Static zoom, pan from bottom to top
+        zoom_expr = f"{zoom_factor}"
+        pan_x = f"(iw-iw/zoom)/2"
+        # Start at y=(ih - ih/zoom), end at y=0 using ease-in-out
+        pan_y = f"(ih-ih/zoom)*(1-(1-cos(PI*on/{total_frames}))/2)"
+        print(f"Ken Burns style: pan_up (bottom to top)")
+        
+    elif style == 'pan_down':
+        # Static zoom, pan from top to bottom
+        zoom_expr = f"{zoom_factor}"
+        pan_x = f"(iw-iw/zoom)/2"
+        # Start at y=0, end at y=(ih - ih/zoom) using ease-in-out
+        pan_y = f"(ih-ih/zoom)*(1-cos(PI*on/{total_frames}))/2"
+        print(f"Ken Burns style: pan_down (top to bottom)")
+        
+    else:
+        # Default to zoom_in
+        zoom_expr = f"1+{zoom_delta}*(1-cos(PI*on/{total_frames}))/2"
+        pan_x = f"(iw-iw/zoom)/2"
+        pan_y = f"(ih-ih/zoom)/2"
+        print(f"Ken Burns style: zoom_in (default)")
     
     ffmpeg = get_ffmpeg_path()
     

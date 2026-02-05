@@ -15,7 +15,7 @@ from src.downloader import download_video
 from src.tts import generate_audio, generate_audio_with_words, list_voices, DEFAULT_VOICE
 from src.utils import parse_script_table, clean_temp_files, clean_old_outputs
 from src.clip_extractor import check_ffmpeg
-from src.cropper import extract_crop_and_speed, extract_still_with_ken_burns
+from src.cropper import extract_crop_and_speed, extract_still_with_ken_burns, KEN_BURNS_STYLES
 from src.compositor import compose_final_video_fast, compose_final_video_fast_with_captions
 
 # Resolution presets (width x height) for 9:16 vertical video
@@ -128,6 +128,8 @@ def process_video(youtube_url: str, script_table: str, voice: str, resolution: s
             
             if segment.is_still:
                 # Extract still frame with Ken Burns effect
+                # Cycle through different styles for variety
+                kb_style = KEN_BURNS_STYLES[i % len(KEN_BURNS_STYLES)]
                 extract_still_with_ken_burns(
                     video_path,
                     segment.footage_start,
@@ -135,7 +137,8 @@ def process_video(youtube_url: str, script_table: str, voice: str, resolution: s
                     processed_path,
                     target_width=target_width,
                     target_height=target_height,
-                    zoom_factor=1.08,  # Subtle 8% zoom
+                    zoom_factor=1.08,  # Subtle 8% zoom/pan amount
+                    style=kb_style,
                 )
             else:
                 # Extract video clip with speed adjustment
