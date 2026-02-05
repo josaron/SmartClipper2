@@ -388,12 +388,12 @@ def extract_still_with_ken_burns(
     cropped_frame = frame[y:y+crop_h, x:x+crop_w]
     resized_frame = cv2.resize(cropped_frame, (target_width, target_height))
     
-    # Save the still frame at 2x resolution for smoother zoompan interpolation
-    # Higher resolution source = smoother zoom animation
-    upscale_factor = 2
+    # Save the still frame at 1.5x resolution for smoother zoompan interpolation
+    # Higher resolution source = smoother zoom animation (1.5x balances quality/speed)
+    upscale_factor = 1.5
     upscaled_frame = cv2.resize(
         resized_frame, 
-        (target_width * upscale_factor, target_height * upscale_factor),
+        (int(target_width * upscale_factor), int(target_height * upscale_factor)),
         interpolation=cv2.INTER_LANCZOS4
     )
     
@@ -419,10 +419,10 @@ def extract_still_with_ken_burns(
     ffmpeg = get_ffmpeg_path()
     
     # Build filter chain:
-    # 1. zoompan: creates zoom animation at 2x resolution
+    # 1. zoompan: creates zoom animation at 1.5x resolution
     # 2. scale: downscale to target resolution with high-quality lanczos
-    zoompan_w = target_width * upscale_factor
-    zoompan_h = target_height * upscale_factor
+    zoompan_w = int(target_width * upscale_factor)
+    zoompan_h = int(target_height * upscale_factor)
     
     filter_chain = (
         f"zoompan=z='{zoom_expr}':x='{pan_x}':y='{pan_y}':"
