@@ -320,6 +320,136 @@ def extract_crop_and_speed(
     return output_path
 
 
+def extract_still_with_ken_burns(
+    source_path: str,
+    timestamp: float,
+    target_duration: float,
+    output_path: str,
+    target_width: int = TARGET_WIDTH,
+    target_height: int = TARGET_HEIGHT,
+    zoom_factor: float = 1.08,
+) -> str:
+    """
+    Extract a still frame and apply Ken Burns effect (subtle zoom/pan).
+    
+    Creates a video from a single frame with smooth zoom animation
+    to add visual interest to still images.
+    
+    Args:
+        source_path: Path to source video
+        timestamp: Time in seconds to extract frame from
+        target_duration: Duration of output video
+        output_path: Path for output video
+        target_width: Output width (default 720)
+        target_height: Output height (default 1280)
+        zoom_factor: How much to zoom in (1.08 = 8% zoom over duration)
+        
+    Returns:
+        Path to processed video
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Extract frame and detect subject center
+    cap = cv2.VideoCapture(source_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {source_path}")
+    
+    # Seek to timestamp
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    
+    # Read frame and detect subject
+    ret, frame = cap.read()
+    if not ret:
+        # Try reading from the beginning if seek failed
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            raise RuntimeError(f"Could not read frame from: {source_path}")
+    
+    subject_center = detect_subject_center(frame)
+    if subject_center:
+        print(f"Ken Burns: Detected subject at {subject_center}")
+    else:
+        print("Ken Burns: No subject detected, using center")
+    
+    cap.release()
+    
+    # Calculate crop region centered on subject
+    x, y, crop_w, crop_h = calculate_crop_region(
+        frame_width, frame_height, subject_center, target_width, target_height
+    )
+    
+    # Extract the cropped region from the frame
+    cropped_frame = frame[y:y+crop_h, x:x+crop_w]
+    resized_frame = cv2.resize(cropped_frame, (target_width, target_height))
+    
+    # Save the still frame temporarily
+    temp_frame_path = output_path + ".frame.png"
+    cv2.imwrite(temp_frame_path, resized_frame)
+    
+    # Use FFmpeg to create Ken Burns effect
+    # The zoompan filter creates smooth zoom animation from a still image
+    # zoom: starts at 1, ends at zoom_factor
+    # d: duration in frames
+    # fps: output framerate
+    # s: output size
+    
+    total_frames = int(target_duration * fps)
+    
+    # zoompan parameters:
+    # z: zoom level expression (linear interpolation from 1 to zoom_factor)
+    # d: total duration in frames
+    # s: output size
+    # x,y: pan position (center the crop, accounting for zoom)
+    # The 'on' variable gives current frame number, 'zoom' gives current zoom
+    
+    # Center-focused zoom: zoom in toward center of frame
+    zoom_expr = f"min(zoom+{(zoom_factor-1)/total_frames},{{zoom_factor}})"
+    zoom_expr = f"1+({zoom_factor}-1)*on/{total_frames}"
+    
+    # Calculate center offset as zoom increases to keep subject centered
+    # As we zoom in, we need to offset x,y to keep the center stable
+    pan_x = f"(iw-iw/zoom)/2"
+    pan_y = f"(ih-ih/zoom)/2"
+    
+    ffmpeg = get_ffmpeg_path()
+    
+    # Build the zoompan filter
+    zoompan_filter = f"zoompan=z='{zoom_expr}':x='{pan_x}':y='{pan_y}':d={total_frames}:s={target_width}x{target_height}:fps={fps}"
+    
+    cmd = [
+        ffmpeg,
+        '-y',
+        '-loop', '1',
+        '-i', temp_frame_path,
+        '-vf', zoompan_filter,
+        '-t', str(target_duration),
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        output_path,
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    # Clean up temp frame
+    try:
+        Path(temp_frame_path).unlink()
+    except Exception:
+        pass
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg Ken Burns failed: {result.stderr}")
+    
+    return output_path
+
+
 def crop_video_with_tracking(
     input_path: str,
     output_path: str,

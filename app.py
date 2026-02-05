@@ -15,7 +15,7 @@ from src.downloader import download_video
 from src.tts import generate_audio, generate_audio_with_words, list_voices, DEFAULT_VOICE
 from src.utils import parse_script_table, clean_temp_files, clean_old_outputs
 from src.clip_extractor import check_ffmpeg
-from src.cropper import extract_crop_and_speed
+from src.cropper import extract_crop_and_speed, extract_still_with_ken_burns
 from src.compositor import compose_final_video_fast, compose_final_video_fast_with_captions
 
 # Resolution presets (width x height) for 9:16 vertical video
@@ -33,14 +33,14 @@ Path("output").mkdir(exist_ok=True)
 # Clean old output files on startup (keep only the 10 most recent)
 clean_old_outputs(keep_count=10)
 
-# Sample script for demo
-SAMPLE_SCRIPT = """Did you know a 51-foot fire-breathing dragon used to live on the Las Vegas Strip?\t[23:23]
-This is Murphy. He was the star of the Excalibur Hotel, emerging from a cave every hour to battle Merlin.\t[24:02]
-Built by Disney veterans, Murphy was a hydraulic beast who spent his days submerged in the castle moat.\t[23:37]
-But the desert wasn't kind. Between constant breakdowns and the family-friendly era ending, the show was axed in 2003.\t[27:44]
-For 20 years, Murphy didn't leave. He was simply locked behind a wall in his dark, underwater cave.\t[28:01]
-In 2024, his lair was finally sealed for good. Most think he was scrapped, but some say he's still in there...\t[28:22]
-...waiting for the day the magic returns to Vegas. Subscribe for more lost history!\t[31:01]"""
+# Sample script for demo (3-column format: Script | Timestamp | Still/Video)
+SAMPLE_SCRIPT = """Did you know a 51-foot fire-breathing dragon used to live on the Las Vegas Strip?\t[23:23]\tVideo
+This is Murphy. He was the star of the Excalibur Hotel, emerging from a cave every hour to battle Merlin.\t[24:02]\tStill
+Built by Disney veterans, Murphy was a hydraulic beast who spent his days submerged in the castle moat.\t[23:37]\tVideo
+But the desert wasn't kind. Between constant breakdowns and the family-friendly era ending, the show was axed in 2003.\t[27:44]\tStill
+For 20 years, Murphy didn't leave. He was simply locked behind a wall in his dark, underwater cave.\t[28:01]\tVideo
+In 2024, his lair was finally sealed for good. Most think he was scrapped, but some say he's still in there...\t[28:22]\tStill
+...waiting for the day the magic returns to Vegas. Subscribe for more lost history!\t[31:01]\tVideo"""
 
 
 def validate_inputs(youtube_url: str, script_table: str, voice: str) -> Tuple[bool, str]:
@@ -117,28 +117,41 @@ def process_video(youtube_url: str, script_table: str, voice: str, resolution: s
         else:
             progress(0.45, desc=f"Audio ready ({total_duration:.1f}s total)")
         
-        # Step 4: Extract, crop, and speed-adjust clips in single pass
+        # Step 4: Extract, crop, and speed-adjust clips (or Ken Burns stills)
         processed_clips = []
         
         for i, (segment, duration) in enumerate(zip(segments, audio_durations)):
-            progress(0.45 + (0.35 * i / len(segments)), desc=f"Processing clip {i+1}/{len(segments)}...")
+            clip_type = "still" if segment.is_still else "clip"
+            progress(0.45 + (0.35 * i / len(segments)), desc=f"Processing {clip_type} {i+1}/{len(segments)}...")
             
-            # Extract duration from source (with buffer to ensure we have enough footage)
-            # IMPORTANT: extract_duration must be >= target_duration to avoid sync issues
-            # When extract_duration < target_duration, setpts tries to slow down but can't create frames
-            extract_duration = max(duration + 2.0, duration * 1.2)  # At least 20% more or +2 seconds
-            
-            # Combined extract + crop + speed adjust in single FFmpeg pass
             processed_path = f"temp/clip_processed_{i}.mp4"
-            extract_crop_and_speed(
-                video_path,
-                segment.footage_start,
-                extract_duration,
-                duration,  # Target duration matches audio
-                processed_path,
-                target_width=target_width,
-                target_height=target_height,
-            )
+            
+            if segment.is_still:
+                # Extract still frame with Ken Burns effect
+                extract_still_with_ken_burns(
+                    video_path,
+                    segment.footage_start,
+                    duration,  # Target duration matches audio
+                    processed_path,
+                    target_width=target_width,
+                    target_height=target_height,
+                    zoom_factor=1.08,  # Subtle 8% zoom
+                )
+            else:
+                # Extract video clip with speed adjustment
+                # IMPORTANT: extract_duration must be >= target_duration to avoid sync issues
+                extract_duration = max(duration + 2.0, duration * 1.2)  # At least 20% more or +2 seconds
+                
+                extract_crop_and_speed(
+                    video_path,
+                    segment.footage_start,
+                    extract_duration,
+                    duration,  # Target duration matches audio
+                    processed_path,
+                    target_width=target_width,
+                    target_height=target_height,
+                )
+            
             processed_clips.append(processed_path)
         
         # Step 5: Compose final video with captions (clips are already speed-adjusted)
@@ -236,9 +249,9 @@ def create_ui():
                 
                 script_table = gr.Textbox(
                     label="Script / Timestamps",
-                    placeholder="Script\tFootage Timestamp\nYour text here...\t[0:30]",
+                    placeholder="Script\tFootage Timestamp\tStill/Video\nYour text here...\t[0:30]\tVideo",
                     lines=12,
-                    info="Tab-separated: Script | [Footage Timestamp]"
+                    info="Tab-separated: Script | [Footage Timestamp] | Still/Video"
                 )
                 
                 with gr.Row():
@@ -272,9 +285,10 @@ def create_ui():
 Use Gemini or another AI to analyze a YouTube video and create a script with timestamps.
 
 ### Step 2: Format Your Script
-Paste a tab-separated table with 2 columns:
+Paste a tab-separated table with 3 columns:
 - **Script**: The text to be spoken
 - **Footage Timestamp**: Where to pull footage from the source video (e.g., `[23:45]`)
+- **Still/Video**: Use `Still` for a freeze frame with Ken Burns effect, or `Video` for motion footage
 
 ### Step 3: Generate
 1. Paste the YouTube URL

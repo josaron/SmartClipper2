@@ -13,6 +13,7 @@ class Segment:
     script_time: float      # When this segment starts in final video (seconds)
     text: str               # Voiceover text
     footage_start: float    # Where to pull footage from source video (seconds)
+    is_still: bool = False  # True = still image with Ken Burns, False = video clip
 
 
 def parse_timestamp(timestamp: str) -> float:
@@ -109,11 +110,18 @@ def parse_script_table(text: str) -> list[Segment]:
             text_content = parts[0].strip().strip('"\'')
             footage_start = parse_timestamp(parts[1])
             
+            # Parse 3rd column for still/video indicator (default to video)
+            is_still = False
+            if len(parts) >= 3:
+                media_type = parts[2].strip().lower()
+                is_still = media_type == 'still'
+            
             if text_content:  # Only add if there's actual text
                 segments.append(Segment(
                     script_time=0,  # Not used, segments are concatenated sequentially
                     text=text_content,
                     footage_start=footage_start,
+                    is_still=is_still,
                 ))
         except ValueError as e:
             print(f"Warning: Could not parse line {line_num + 1}: {line} ({e})")
@@ -125,8 +133,10 @@ def parse_script_table(text: str) -> list[Segment]:
 def _is_header_row(line: str) -> bool:
     """Check if a line appears to be a table header."""
     lower = line.lower()
-    header_keywords = ['time', 'script', 'voiceover', 'timestamp', 'footage', '---', '===']
-    return any(keyword in lower for keyword in header_keywords)
+    header_keywords = ['time', 'script', 'voiceover', 'timestamp', 'footage', 'still/video', 'still', 'video', '---', '===']
+    # Only consider it a header if it looks like a header row (multiple keywords or separator)
+    keyword_count = sum(1 for kw in header_keywords if kw in lower)
+    return keyword_count >= 2 or '---' in lower or '===' in lower
 
 
 def _split_row(line: str) -> list[str]:
