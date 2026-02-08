@@ -73,6 +73,137 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:05.2f}"
 
 
+def format_timestamp_bracketed(seconds: float) -> str:
+    """
+    Convert seconds to [M:SS] or [MM:SS] for display in tables.
+    
+    Args:
+        seconds: Time in seconds
+        
+    Returns:
+        Formatted timestamp string like "[23:45]"
+    """
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"[{minutes}:{int(secs):02d}]"
+
+
+def segments_to_rows(segments: list["Segment"]) -> list[list[str]]:
+    """
+    Convert Segment list to table rows for a Dataframe: [Script, Timestamp, Still/Video, Layout].
+    
+    Args:
+        segments: List of Segment objects
+        
+    Returns:
+        List of 4-element lists
+    """
+    return [
+        [
+            s.text,
+            format_timestamp_bracketed(s.footage_start),
+            "Still" if s.is_still else "Video",
+            s.layout,
+        ]
+        for s in segments
+    ]
+
+
+def rows_to_text(rows: list[list]) -> str:
+    """
+    Convert table rows to tab-separated string (no header).
+    
+    Args:
+        rows: List of lists [script, timestamp, still/video, layout]
+        
+    Returns:
+        Tab-separated lines
+    """
+    return "\n".join("\t".join(str(cell).strip() for cell in row) for row in rows if any(str(cell).strip() for cell in row))
+
+
+def segments_to_text(segments: list["Segment"]) -> str:
+    """Convert Segment list to tab-separated table text."""
+    return rows_to_text(segments_to_rows(segments))
+
+
+def parse_script_table_with_errors(text: str) -> tuple[list["Segment"], list[str]]:
+    """
+    Parse script table text into segments and collect any parse errors.
+    
+    Returns:
+        (segments, errors) where errors is a list of "Line N: message" strings.
+    """
+    segments = []
+    errors = []
+    lines = text.strip().split("\n")
+    
+    for line_num, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        if _is_header_row(line_stripped):
+            continue
+        parts = _split_row(line_stripped)
+        if len(parts) < 2:
+            errors.append(f"Line {line_num + 1}: Not enough columns (need at least Script and Timestamp)")
+            continue
+        try:
+            text_content = parts[0].strip().strip('"\'')
+            footage_start = parse_timestamp(parts[1])
+            is_still = False
+            if len(parts) >= 3:
+                media_type = parts[2].strip().lower()
+                is_still = media_type == "still"
+            layout = "crop"
+            if len(parts) >= 4:
+                layout_value = parts[3].strip().lower()
+                if layout_value in ("letterbox", "letter", "blur", "full"):
+                    layout = "letterbox"
+            if text_content:
+                segments.append(
+                    Segment(
+                        script_time=0,
+                        text=text_content,
+                        footage_start=footage_start,
+                        is_still=is_still,
+                        layout=layout,
+                    )
+                )
+        except ValueError as e:
+            errors.append(f"Line {line_num + 1}: {e}")
+            continue
+    
+    return segments, errors
+
+
+def format_timestamps_in_text(text: str) -> str:
+    """
+    Normalize timestamp column in script table to [M:SS] or [MM:SS] format.
+    Preserves tabs and other columns; only the timestamp (second column) is reformatted.
+    """
+    lines = text.strip().split("\n")
+    result = []
+    for line in lines:
+        if not line.strip():
+            result.append(line)
+            continue
+        if _is_header_row(line.strip()):
+            result.append(line)
+            continue
+        parts = _split_row(line.strip())
+        if len(parts) < 2:
+            result.append(line)
+            continue
+        try:
+            seconds = parse_timestamp(parts[1])
+            parts[1] = format_timestamp_bracketed(seconds)
+            result.append("\t".join(parts))
+        except ValueError:
+            result.append(line)
+    return "\n".join(result)
+
+
 def parse_script_table(text: str) -> list[Segment]:
     """
     Parse a 2-column script table into Segment objects.

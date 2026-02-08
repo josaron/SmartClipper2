@@ -14,7 +14,16 @@ from typing import Optional, Tuple
 
 from src.downloader import download_video
 from src.tts import generate_audio, generate_audio_with_words, list_voices, DEFAULT_VOICE
-from src.utils import parse_script_table, clean_temp_files, clean_old_outputs
+from src.utils import (
+    parse_script_table,
+    parse_script_table_with_errors,
+    segments_to_rows,
+    segments_to_text,
+    rows_to_text,
+    format_timestamps_in_text,
+    clean_temp_files,
+    clean_old_outputs,
+)
 from src.clip_extractor import check_ffmpeg
 from src.cropper import (
     extract_crop_and_speed, 
@@ -71,14 +80,14 @@ def validate_inputs(youtube_url: str, script_table: str, voice: str) -> Tuple[bo
     return True, ""
 
 
-def process_video(youtube_url: str, script_table: str, voice: str, resolution: str, progress=gr.Progress()):
+def process_video(youtube_url: str, script_table: str, voice: str, resolution: str, add_captions: bool = True, progress=gr.Progress()):
     """
     Main processing pipeline:
     1. Download YouTube video
     2. Parse script/timestamps
     3. Generate TTS audio for each segment
     4. Extract and crop video clips
-    5. Compose final video
+    5. Compose final video (with or without captions)
     """
     # Validate inputs
     valid, error_msg = validate_inputs(youtube_url, script_table, voice)
@@ -193,20 +202,27 @@ def process_video(youtube_url: str, script_table: str, voice: str, resolution: s
             
             processed_clips.append(processed_path)
         
-        # Step 5: Compose final video with captions (clips are already speed-adjusted)
-        progress(0.85, desc="Composing final video with captions...")
+        # Step 5: Compose final video (with or without captions; clips are already speed-adjusted)
+        progress(0.85, desc="Composing final video (with captions)..." if add_captions else "Composing final video...")
         
         # Generate unique filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"output/short_{timestamp}.mp4"
         
-        compose_final_video_fast_with_captions(
-            processed_clips, 
-            audio_paths, 
-            audio_durations,
-            word_timings_list,
-            output_path
-        )
+        if add_captions:
+            compose_final_video_fast_with_captions(
+                processed_clips,
+                audio_paths,
+                audio_durations,
+                word_timings_list,
+                output_path,
+            )
+        else:
+            compose_final_video_fast(
+                processed_clips,
+                audio_paths,
+                output_path,
+            )
         
         progress(1.0, desc="Done!")
         
@@ -233,6 +249,115 @@ def process_video(youtube_url: str, script_table: str, voice: str, resolution: s
 def load_sample_script():
     """Load the sample script into the textbox."""
     return SAMPLE_SCRIPT
+
+
+def load_paste_into_table(script_table: str):
+    """Parse paste text and return rows for the Dataframe."""
+    if not (script_table or script_table.strip()):
+        return []
+    segments, _ = parse_script_table_with_errors(script_table)
+    rows = segments_to_rows(segments)
+    return rows
+
+
+def _dataframe_to_rows(script_dataframe):
+    """Normalize Gradio Dataframe value to list of rows (list of lists)."""
+    if script_dataframe is None:
+        return []
+    if isinstance(script_dataframe, dict):
+        # Gradio may pass {data: [...], headers: [...]}
+        return script_dataframe.get("data", []) or []
+    if isinstance(script_dataframe, list):
+        return script_dataframe if script_dataframe else []
+    if hasattr(script_dataframe, "values") and hasattr(script_dataframe.values, "tolist"):
+        return script_dataframe.values.tolist()
+    return list(script_dataframe) if script_dataframe else []
+
+
+def copy_table_to_paste(script_dataframe) -> str:
+    """Convert Dataframe value to tab-separated text for the paste textbox."""
+    rows = _dataframe_to_rows(script_dataframe)
+    if not rows:
+        return ""
+    return rows_to_text(rows)
+
+
+def validate_script_display(script_table: str, script_dataframe) -> str:
+    """Validate the effective script (table if has rows, else paste) and return a message."""
+    script_text = get_effective_script(script_table, script_dataframe)
+    if not (script_text or script_text.strip()):
+        return "No script to validate. Paste a table or add segments in the Edit table tab."
+    segments, errors = parse_script_table_with_errors(script_text)
+    if errors:
+        return "Validation found issues:\n" + "\n".join(errors) + (f"\n\nParsed {len(segments)} segment(s) from valid lines." if segments else "")
+    return f"Valid: {len(segments)} segment(s) ready."
+
+
+def format_timestamps_click(script_table: str) -> str:
+    """Normalize timestamps in the paste text and return updated text."""
+    if not (script_table or script_table.strip()):
+        return script_table or ""
+    return format_timestamps_in_text(script_table)
+
+
+def _default_row():
+    """Default new segment row."""
+    return ["", "[0:00]", "Video", "crop"]
+
+
+def table_add_row_at_end(script_dataframe):
+    """Append a new row to the script table."""
+    rows = _dataframe_to_rows(script_dataframe)
+    rows.append(_default_row())
+    return rows
+
+
+def table_insert_row_above(script_dataframe, selected_row) -> Tuple[list, Optional[int]]:
+    """Insert a new row above the selected row. If no selection, insert at start."""
+    rows = _dataframe_to_rows(script_dataframe)
+    idx = selected_row if isinstance(selected_row, int) and 0 <= selected_row < len(rows) else 0
+    rows.insert(idx, _default_row())
+    return rows, idx
+
+
+def table_insert_row_below(script_dataframe, selected_row) -> Tuple[list, Optional[int]]:
+    """Insert a new row below the selected row. If no selection, append at end."""
+    rows = _dataframe_to_rows(script_dataframe)
+    if isinstance(selected_row, int) and 0 <= selected_row < len(rows):
+        idx = selected_row + 1
+    else:
+        idx = len(rows)
+    rows.insert(idx, _default_row())
+    return rows, idx
+
+
+def table_delete_row(script_dataframe, selected_row) -> Tuple[list, Optional[int]]:
+    """Delete the selected row. If no selection, delete last row. If one row, leave empty."""
+    rows = _dataframe_to_rows(script_dataframe)
+    if not rows:
+        return [], None
+    if isinstance(selected_row, int) and 0 <= selected_row < len(rows):
+        idx = selected_row
+    else:
+        idx = len(rows) - 1
+    rows.pop(idx)
+    # Keep selection on same position or previous row
+    new_sel = idx if idx < len(rows) else (len(rows) - 1 if len(rows) > 0 else None)
+    return rows, new_sel
+
+
+def get_effective_script(script_table: str, script_dataframe) -> str:
+    """Script text to use for generation: from Dataframe if it has rows, else from paste textbox."""
+    rows = _dataframe_to_rows(script_dataframe)
+    if rows:
+        return rows_to_text(rows)
+    return script_table or ""
+
+
+def process_video_with_source(youtube_url: str, script_table: str, script_dataframe, voice: str, resolution: str, add_captions: bool, progress=gr.Progress()):
+    """Wrapper that picks effective script from table or paste, then runs process_video."""
+    script_text = get_effective_script(script_table, script_dataframe)
+    return process_video(youtube_url, script_text, voice, resolution, add_captions, progress)
 
 
 def preview_voice(voice_name: str) -> Optional[str]:
@@ -262,12 +387,55 @@ def create_ui():
         voices = ["Ryan (UK English)"]
         default_voice = voices[0]
     
-    with gr.Blocks(title="SmartClipper", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="SmartClipper", theme=gr.themes.Glass()) as app:
         gr.Markdown("# SmartClipper: YouTube Shorts Generator")
         gr.Markdown("Create 45-75 second vertical shorts from long-form YouTube videos with AI voiceover.")
         
+        # Script section: full width
+        with gr.Tabs():
+            with gr.Tab("Paste table"):
+                gr.Markdown("Paste a tab-separated table from a spreadsheet or AI output.")
+                paste_script = gr.Textbox(
+                    label="Script / Timestamps",
+                    placeholder="Script\tFootage Timestamp\tStill/Video\tLayout\nYour text here...\t[0:30]\tVideo\tcrop",
+                    lines=12,
+                    info="Tab-separated: Script | [Timestamp] | Still/Video | Layout (crop/letterbox)",
+                )
+                with gr.Row():
+                    sample_btn = gr.Button("Load Sample", variant="secondary", size="sm")
+                    validate_btn = gr.Button("Validate script", variant="secondary", size="sm")
+                    load_into_table_btn = gr.Button("Load into table", variant="secondary", size="sm")
+            
+            with gr.Tab("Edit table"):
+                gr.Markdown("Edit segments in the table. **Click a row** to select it, then use the buttons below to add or delete rows.")
+                edit_dataframe = gr.Dataframe(
+                    headers=["Script", "Timestamp", "Still/Video", "Layout"],
+                    datatype=["str", "str", "str", "str"],
+                    label="Script table",
+                    value=[],
+                    col_count=(4, "fixed"),
+                    type="array",
+                    interactive=True,
+                )
+                selected_row_state = gr.State(value=None)  # int | None: row index for insert/delete
+                with gr.Row():
+                    add_row_end_btn = gr.Button("Add row at end", variant="secondary", size="sm")
+                    insert_above_btn = gr.Button("Insert row above selected", variant="secondary", size="sm")
+                    insert_below_btn = gr.Button("Insert row below selected", variant="secondary", size="sm")
+                    delete_row_btn = gr.Button("Delete selected row", variant="secondary", size="sm")
+                with gr.Row():
+                    copy_to_paste_btn = gr.Button("Copy as text (to Paste tab)", variant="secondary", size="sm")
+                    validate_btn_edit = gr.Button("Validate script", variant="secondary", size="sm")
+        
+        script_validation_msg = gr.Textbox(
+            label="Validation",
+            interactive=False,
+            lines=2,
+            placeholder="Click \"Validate script\" to check format.",
+        )
+        
         with gr.Row():
-            # Left column: Inputs
+            # Left column: URL, voice, settings, generate
             with gr.Column(scale=1):
                 youtube_url = gr.Textbox(
                     label="YouTube URL",
@@ -279,35 +447,34 @@ def create_ui():
                     label="Voice",
                     choices=voices,
                     value=default_voice,
-                    info="Select TTS voice for voiceover - changes auto-preview"
+                    info="Select TTS voice for voiceover"
                 )
+                with gr.Accordion("Preview voice", open=False):
+                    voice_preview = gr.Audio(
+                        label="Voice Preview",
+                        show_label=False,
+                        autoplay=True,
+                    )
                 
-                resolution_dropdown = gr.Dropdown(
-                    label="Output Resolution",
-                    choices=list(RESOLUTION_PRESETS.keys()),
-                    value=DEFAULT_RESOLUTION,
-                    info="Higher resolution = better quality but larger file size"
-                )
-                
-                voice_preview = gr.Audio(
-                    label="Voice Preview",
-                    show_label=False,
-                    autoplay=True,
-                )
-                
-                script_table = gr.Textbox(
-                    label="Script / Timestamps",
-                    placeholder="Script\tFootage Timestamp\tStill/Video\tLayout\nYour text here...\t[0:30]\tVideo\tcrop",
-                    lines=12,
-                    info="Tab-separated: Script | [Timestamp] | Still/Video | Layout (crop/letterbox)"
-                )
+                with gr.Accordion("Settings", open=False):
+                    resolution_dropdown = gr.Dropdown(
+                        label="Output Resolution",
+                        choices=list(RESOLUTION_PRESETS.keys()),
+                        value=DEFAULT_RESOLUTION,
+                        info="Higher resolution = better quality but larger file size"
+                    )
+                    add_captions_checkbox = gr.Checkbox(
+                        label="Add captions",
+                        value=True,
+                        info="Word-by-word captions on the video",
+                    )
+                    format_ts_btn = gr.Button("Format timestamps in script", variant="secondary", size="sm")
                 
                 with gr.Row():
-                    sample_btn = gr.Button("Load Sample", variant="secondary", size="sm")
                     process_btn = gr.Button("Generate Short", variant="primary", size="lg")
             
-            # Right column: Output
-            with gr.Column(scale=1):
+            # Right column: Output (slightly larger for preview)
+            with gr.Column(scale=1.2):
                 status_text = gr.Textbox(
                     label="Status",
                     interactive=False,
@@ -362,7 +529,69 @@ Paste a tab-separated table with 3-4 columns:
         sample_btn.click(
             fn=load_sample_script,
             inputs=[],
-            outputs=[script_table]
+            outputs=[paste_script],
+        )
+        def load_into_table_and_clear_selection(paste_text):
+            rows = load_paste_into_table(paste_text)
+            return rows, None  # clear selected row so insert/delete use sensible defaults
+
+        load_into_table_btn.click(
+            fn=load_into_table_and_clear_selection,
+            inputs=[paste_script],
+            outputs=[edit_dataframe, selected_row_state],
+        )
+        copy_to_paste_btn.click(
+            fn=copy_table_to_paste,
+            inputs=[edit_dataframe],
+            outputs=[paste_script],
+        )
+        validate_btn.click(
+            fn=validate_script_display,
+            inputs=[paste_script, edit_dataframe],
+            outputs=[script_validation_msg],
+        )
+        validate_btn_edit.click(
+            fn=validate_script_display,
+            inputs=[paste_script, edit_dataframe],
+            outputs=[script_validation_msg],
+        )
+        format_ts_btn.click(
+            fn=format_timestamps_click,
+            inputs=[paste_script],
+            outputs=[paste_script],
+        )
+        
+        # Script table: track selected row when user clicks a cell
+        def on_table_select(evt: gr.SelectData):
+            idx = evt.index
+            # Gradio sends index as list [row, col], not tuple
+            if isinstance(idx, (tuple, list)) and len(idx) >= 1:
+                return int(idx[0])
+            if isinstance(idx, int):
+                return idx
+            return 0
+        
+        edit_dataframe.select(fn=on_table_select, outputs=[selected_row_state])
+        
+        add_row_end_btn.click(
+            fn=table_add_row_at_end,
+            inputs=[edit_dataframe],
+            outputs=[edit_dataframe],
+        )
+        insert_above_btn.click(
+            fn=table_insert_row_above,
+            inputs=[edit_dataframe, selected_row_state],
+            outputs=[edit_dataframe, selected_row_state],
+        )
+        insert_below_btn.click(
+            fn=table_insert_row_below,
+            inputs=[edit_dataframe, selected_row_state],
+            outputs=[edit_dataframe, selected_row_state],
+        )
+        delete_row_btn.click(
+            fn=table_delete_row,
+            inputs=[edit_dataframe, selected_row_state],
+            outputs=[edit_dataframe, selected_row_state],
         )
         
         # Auto-preview voice when selection changes
@@ -373,8 +602,8 @@ Paste a tab-separated table with 3-4 columns:
         )
         
         process_btn.click(
-            fn=process_video,
-            inputs=[youtube_url, script_table, voice_dropdown, resolution_dropdown],
+            fn=process_video_with_source,
+            inputs=[youtube_url, paste_script, edit_dataframe, voice_dropdown, resolution_dropdown, add_captions_checkbox],
             outputs=[video_output, status_text]
         )
         
